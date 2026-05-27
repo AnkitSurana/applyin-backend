@@ -5,7 +5,7 @@ import hashlib, json
 from app.config import get_supabase, settings
 from app.dependencies import get_current_user
 from app.services.ai import run_analysis
-from app.routers.auth import get_credit_balance
+from app.routers.auth import _get_balance
 
 router = APIRouter()
 
@@ -35,7 +35,7 @@ async def analyze_job(req: AnalyzeRequest, user=Depends(get_current_user)):
     user_id = user.id
 
     # 1. Check credits
-    balance = get_credit_balance(db, user_id)
+    balance = _get_balance(db, user_id)
     if balance < ANALYSIS_CREDIT_COST:
         raise HTTPException(status_code=402, detail="INSUFFICIENT_CREDITS")
 
