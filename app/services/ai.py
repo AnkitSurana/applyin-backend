@@ -22,7 +22,7 @@ Full Job Description:
 Respond ONLY with a valid JSON object — no markdown, no backticks:
 
 {{
-  "match_score": <0–100 integer>,
+  "match_score": <0-100 integer. SCORING RUBRIC: 90+=near-perfect skill+exp match, 75-89=strong match with minor gaps, 60-74=good match some gaps, 45-59=partial match notable gaps, <45=weak match. Be objective and consistent — identical inputs must produce identical scores>,
   "fit_level": "<strong|medium|weak>",
   "verdict": "<2–3 sentences: specific honest summary citing role, company, evidence>",
   "resume_strengths": ["<strong point IN the resume: specific skill/experience that stands out>", "<another>", "<another>"],
@@ -107,7 +107,7 @@ async def run_analysis(job_data: dict, resume_b64: str | None) -> dict:
             json={
                 "model": "gpt-4o",
                 "max_tokens": 2800,
-                "temperature": 0.3,
+                "temperature": 0.1,  # Low for consistent scoring
                 "messages": [{"role": "user", "content": content}]
             }
         )
