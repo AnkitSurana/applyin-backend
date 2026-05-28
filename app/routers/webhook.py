@@ -21,55 +21,63 @@ async def razorpay_webhook(request: Request, x_razorpay_signature: str = Header(
     payload = json.loads(body)
     event = payload.get("event")
 
+    db = get_supabase()
+
     if event == "payment.captured":
         payment = payload["payload"]["payment"]["entity"]
         order_id = payment.get("order_id")
         payment_id = payment.get("id")
+        _process_payment(db, order_id, payment_id)
 
-        db = get_supabase()
-
-        # Get pending order
-        order_res = db.table("credit_orders") \
-            .select("*") \
-            .eq("razorpay_order_id", order_id) \
-            .eq("status", "pending") \
-            .maybe_single().execute()
-
-        if not order_res.data:
-            # Already processed or not found — idempotency
-            return {"status": "ok"}
-
-        order = order_res.data
-        user_id = order["user_id"]
-        credits = order["credits"]
-
-        # Add credits to ledger
-        db.table("credit_ledger").insert({
-            "user_id": user_id,
-            "delta": credits,
-            "reason": "purchase",
-            "meta": {
-                "package_id": order["package_id"],
-                "razorpay_order_id": order_id,
-                "razorpay_payment_id": payment_id,
-                "amount": order["amount"],
-                "currency": order["currency"],
-            }
-        }).execute()
-
-        # Mark order as paid
-        db.table("credit_orders") \
-            .update({"status": "paid", "razorpay_payment_id": payment_id}) \
-            .eq("razorpay_order_id", order_id).execute()
-
-        print(f"[Webhook] Added {credits} credits to user {user_id}")
-
-    elif event == "payment.failed":
+    elif event == "payment_link.paid":
+        # Payment Link webhook
+        payment_link = payload["payload"]["payment_link"]["entity"]
         payment = payload["payload"]["payment"]["entity"]
-        order_id = payment.get("order_id")
-        db = get_supabase()
-        db.table("credit_orders") \
-            .update({"status": "failed"}) \
-            .eq("razorpay_order_id", order_id).execute()
+        link_id = payment_link.get("id")
+        payment_id = payment.get("id")
+        _process_payment(db, link_id, payment_id)
+
+    elif event in ("payment.failed", "payment_link.cancelled"):
+        order_id = (
+            payload["payload"].get("payment", {}).get("entity", {}).get("order_id")
+            or payload["payload"].get("payment_link", {}).get("entity", {}).get("id")
+        )
+        if order_id:
+            db.table("credit_orders").update({"status": "failed"}) \
+                .eq("razorpay_order_id", order_id).execute()
 
     return {"status": "ok"}
+
+
+def _process_payment(db, order_id: str, payment_id: str):
+    """Add credits for a completed payment. Idempotent."""
+    if not order_id:
+        return
+
+    order_res = db.table("credit_orders") \
+        .select("*") \
+        .eq("razorpay_order_id", order_id) \
+        .eq("status", "pending") \
+        .maybe_single().execute()
+
+    if not order_res.data:
+        return  # Already processed
+
+    order = order_res.data
+
+    db.table("credit_ledger").insert({
+        "user_id": order["user_id"],
+        "delta": order["credits"],
+        "reason": "purchase",
+        "meta": {
+            "package_id": order["package_id"],
+            "razorpay_order_id": order_id,
+            "razorpay_payment_id": payment_id,
+        }
+    }).execute()
+
+    db.table("credit_orders") \
+        .update({"status": "paid", "razorpay_payment_id": payment_id}) \
+        .eq("razorpay_order_id", order_id).execute()
+
+    print(f"[Webhook] +{order['credits']} credits → user {order['user_id']}")
