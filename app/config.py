@@ -25,4 +25,12 @@ class Settings:
 settings = Settings()
 
 def get_supabase() -> Client:
+    """General client. NOTE: if you call .auth.sign_in/sign_up on this,
+    it adopts the user's session and subsequent DB calls run as that user.
+    For DB writes that must bypass RLS, use get_admin() instead."""
+    return create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
+
+def get_admin() -> Client:
+    """Dedicated service-role client for DB writes. Never call .auth.* on this —
+    it must stay authenticated as service_role to bypass RLS."""
     return create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
