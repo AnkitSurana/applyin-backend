@@ -35,16 +35,20 @@ def _grant_signup_credits(db, user_id: str, email: str) -> int:
             logger.info(f"Signup bonus already granted to {user_id}")
             return _get_balance(db, user_id)
 
-        db.table("credit_ledger").insert({
+        result = db.table("credit_ledger").insert({
             "user_id": user_id,
             "delta": settings.FREE_CREDITS_ON_SIGNUP,
             "reason": "signup_bonus",
         }).execute()
+        # Verify the insert actually landed (RLS can silently block)
+        if not result.data:
+            logger.error(f"Signup bonus insert returned no data for {user_id} — likely RLS blocking. Check SUPABASE_SERVICE_KEY is service_role.")
+            return 0
         logger.info(f"Granted {settings.FREE_CREDITS_ON_SIGNUP} free credits to {user_id}")
-        return settings.FREE_CREDITS_ON_SIGNUP
+        return _get_balance(db, user_id)
     except Exception as e:
         logger.error(f"Failed to grant signup credits to {user_id}: {e}")
-        return settings.FREE_CREDITS_ON_SIGNUP  # return expected value even if DB write failed
+        return 0  # be honest — don't claim credits that weren't stored
 
 @router.post("/signup")
 async def signup(req: SignupRequest):
@@ -139,6 +143,17 @@ async def login(req: LoginRequest):
 async def me(user=Depends(get_current_user)):
     db = get_supabase()
     balance = _get_balance(db, user.id)
+
+    # Recover signup bonus if missing (handles failed signup inserts)
+    if balance == 0:
+        existing = db.table("credit_ledger") \
+            .select("id").eq("user_id", user.id) \
+            .eq("reason", "signup_bonus").execute()
+        if not existing.data:
+            logger.warning(f"/me: user {user.id} has no signup bonus — granting now")
+            _grant_signup_credits(db, user.id, user.email)
+            balance = _get_balance(db, user.id)
+
     return {"user_id": user.id, "email": user.email, "credits": balance}
 
 @router.post("/refresh")
