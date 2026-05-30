@@ -23,8 +23,11 @@ class LoginRequest(BaseModel):
 
 def _get_balance(admin, user_id: str) -> int:
     try:
-        res = admin.table("credit_ledger").select("delta").eq("user_id", user_id).execute()
-        return sum(row["delta"] for row in (res.data or []))
+        res = admin.table("user_credit_balances").select("balance") \
+            .eq("user_id", user_id).maybe_single().execute()
+        if res.data and res.data.get("balance") is not None:
+            return int(res.data["balance"])
+        return 0
     except Exception as e:
         logger.error(f"Balance check failed for {user_id}: {e}")
         return 0
@@ -52,6 +55,14 @@ def _grant_signup_credits(admin, user_id: str) -> int:
         logger.info(f"Granted {settings.FREE_CREDITS_ON_SIGNUP} free credits to {user_id}")
         return _get_balance(admin, user_id)
     except Exception as e:
+        # A unique-violation here means a concurrent signup call already inserted
+        # the bonus (the uniq_signup_bonus_per_user index did its job). That's
+        # success, not failure — the user has exactly 3, never 6. Read the real
+        # balance instead of returning a misleading 0.
+        msg = str(e).lower()
+        if "duplicate" in msg or "unique" in msg or "23505" in msg:
+            logger.info(f"Signup bonus already granted concurrently for {user_id} — returning real balance")
+            return _get_balance(admin, user_id)
         logger.error(f"Failed to grant signup credits to {user_id}: {e}")
         return 0
 

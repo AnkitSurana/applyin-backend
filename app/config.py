@@ -30,7 +30,13 @@ def get_supabase() -> Client:
     For DB writes that must bypass RLS, use get_admin() instead."""
     return create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
 
+_admin_client: Client | None = None
+
 def get_admin() -> Client:
     """Dedicated service-role client for DB writes. Never call .auth.* on this —
-    it must stay authenticated as service_role to bypass RLS."""
-    return create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
+    it must stay authenticated as service_role to bypass RLS.
+    Reused singleton: created once, no .auth.* ever called, so it's safe to share."""
+    global _admin_client
+    if _admin_client is None:
+        _admin_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
+    return _admin_client
