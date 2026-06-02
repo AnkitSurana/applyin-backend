@@ -116,11 +116,22 @@ async def research_company_interview(client: httpx.AsyncClient, company: str, ti
 # STEP 2 — Main analysis prompt
 # ─────────────────────────────────────────────────────────────────────────────
 PROMPT_TEMPLATE = """\
-You are Applyin's intelligent matching engine. Analyse how well the candidate fits the job, \
-then produce a structured JSON report.
+You are Applyin's intelligent matching engine. Your job is to compare ONE specific job \
+description against ONE specific resume and produce an honest, evidence-grounded report.
 
-Be precise, honest, and specific. Every finding must reference actual content from the JD and resume \
-— no boilerplate.
+THE TWO SOURCES OF TRUTH:
+  1. The JOB DESCRIPTION below — this defines what the role requires. Nothing else.
+  2. The RESUME below — this defines what the candidate has. Nothing else.
+
+You must NOT use outside assumptions about what "this kind of role usually needs."
+You must NOT invent requirements that are not written in the JD.
+You must NOT invent candidate experience that is not written in the resume.
+Every single claim, gap, skill, and suggestion must trace back to a specific line in
+either the JD or the resume. If you cannot point to where something came from, omit it.
+
+The "Technical skills detected" line below is a NAIVE keyword scan of the JD text and may
+include false positives or miss things — treat it as a hint only. The authoritative source
+is the full Job Description text. Re-read it yourself and decide what the role actually requires.
 
 ═══ JOB ═══
 Title: {title}
@@ -288,9 +299,25 @@ PREPARATION CHECKLIST (4–6 items):
   - Estimated time per topic
 ════════════════════════════════════════
 
+════════════════════════════════════════
+STEP 0 — EXTRACT JD REQUIREMENTS FIRST (internal checklist)
+════════════════════════════════════════
+Before scoring anything, mentally extract every concrete requirement from the JD:
+hard skills, tools, years of experience, qualifications, certifications, domain.
+This list is your ONLY allowed vocabulary for gaps and missing skills. You will
+also output it in "jd_requirements" so the user can see the analysis is grounded.
+
+Every item in gap_reasons and missing_skills MUST correspond to an item you put in
+jd_requirements. If it is not in jd_requirements, it cannot be a gap. This is the
+mechanism that prevents hallucination — no requirement, no gap.
+════════════════════════════════════════
+
 Respond ONLY with a valid JSON object — no markdown, no backticks:
 
 {{
+  "jd_requirements": [
+    "<each concrete requirement copied/paraphrased from the JD — e.g. '5+ years data engineering', 'Apache Spark (PySpark)', 'SQL performance tuning', 'AWS EMR', 'mentoring junior engineers'>"
+  ],
   "score_breakdown": {{
     "skills_match":         <0-100 integer>,
     "experience_match":     <0-100 integer>,
@@ -397,6 +424,34 @@ LIMITS:
 """
 
 
+
+def _grounded_in_jd(text: str, jd_text: str, jd_requirements: list) -> bool:
+    """
+    Returns True if the given skill/gap text plausibly traces back to the JD.
+    A match means a meaningful token from `text` appears in the JD body or in
+    one of the extracted jd_requirements. Prevents the model inventing skills
+    (e.g. 'Azure') that never appear in the job description.
+    """
+    if not text:
+        return False
+    hay = (jd_text + " " + " ".join(jd_requirements)).lower()
+    # Pull alphanumeric tokens of length >= 3 (skip filler words)
+    import re
+    tokens = [t for t in re.findall(r"[a-zA-Z0-9+#.]{3,}", text.lower())
+              if t not in _STOPWORDS]
+    if not tokens:
+        return True  # nothing checkable — keep it
+    # Require that at least one "content" token from the claim appears in the JD
+    return any(tok in hay for tok in tokens)
+
+_STOPWORDS = {
+    "the","and","for","with","this","that","jd","requires","resume","has","have",
+    "evidence","experience","role","candidate","not","any","your","you","from",
+    "using","such","skills","skill","strong","years","year","preferred","required",
+    "include","including","ability","work","working","based","data","engineer",
+}
+
+
 async def run_analysis(job_data: dict, resume_b64: str | None) -> dict:
     has_resume = bool(resume_b64 and len(resume_b64) > 100)
     company = job_data.get("company", "")
@@ -422,7 +477,7 @@ async def run_analysis(job_data: dict, resume_b64: str | None) -> dict:
             location=job_data.get("location", "Not specified"),
             experience=job_data.get("experience", "Not specified"),
             skills=", ".join(job_data.get("skills", [])) or "See JD",
-            description=job_data.get("description", "")[:4000],
+            description=job_data.get("description", "")[:8000],
             resume_section=(
                 "The resume is attached as a PDF. Read it carefully."
                 if has_resume
@@ -453,7 +508,7 @@ async def run_analysis(job_data: dict, resume_b64: str | None) -> dict:
             },
             json={
                 "model": "gpt-4o",
-                "max_tokens": 4000,
+                "max_tokens": 6000,
                 "temperature": 0,
                 "seed": 42,
                 "messages": [{"role": "user", "content": messages_content}]
@@ -512,6 +567,7 @@ async def run_analysis(job_data: dict, resume_b64: str | None) -> dict:
         "medium" if match_score >= 45 else "weak"
     )
 
+    result.setdefault("jd_requirements", [])
     result.setdefault("resume_strengths", [])
     result.setdefault("fit_reasons", [])
     result.setdefault("gap_reasons", [])
@@ -532,5 +588,39 @@ async def run_analysis(job_data: dict, resume_b64: str | None) -> dict:
         "reasoning": "",
         "next_step": ""
     })
+
+    # ── ANTI-HALLUCINATION ENFORCEMENT ────────────────────────────────────────
+    # Drop any gap / missing skill / resume suggestion that does not trace back
+    # to the JD text or the model's own extracted jd_requirements. Even if the
+    # model ignores the prompt, these claims never reach the user.
+    jd_text = (job_data.get("description", "") or "")
+    jd_reqs = result.get("jd_requirements", []) or []
+
+    result["missing_skills"] = [
+        ms for ms in result["missing_skills"]
+        if _grounded_in_jd(ms.get("skill", "") if isinstance(ms, dict) else str(ms),
+                           jd_text, jd_reqs)
+    ]
+    result["gap_reasons"] = [
+        g for g in result["gap_reasons"]
+        if _grounded_in_jd(g if isinstance(g, str) else g.get("text", ""),
+                           jd_text, jd_reqs)
+    ]
+    # resume_suggestions: keep only those whose gap_addressed is grounded, OR
+    # that are pure resume-wording fixes (no gap claimed).
+    cleaned_suggestions = []
+    for s in result["resume_suggestions"]:
+        if not isinstance(s, dict):
+            cleaned_suggestions.append(s); continue
+        ga = s.get("gap_addressed", "")
+        if not ga or _grounded_in_jd(ga, jd_text, jd_reqs):
+            cleaned_suggestions.append(s)
+    result["resume_suggestions"] = cleaned_suggestions
+    # improvement_plan: keep only items whose closes_gap is grounded
+    result["improvement_plan"] = [
+        p for p in result["improvement_plan"]
+        if not isinstance(p, dict) or not p.get("closes_gap")
+        or _grounded_in_jd(p.get("closes_gap", ""), jd_text, jd_reqs)
+    ]
 
     return result
