@@ -122,15 +122,25 @@ def _grounded_in_jd(text: str, jd_text: str, jd_requirements: list) -> bool:
     """
     if not text:
         return False
-    hay = (jd_text + " " + " ".join(jd_requirements)).lower()
-    # Pull alphanumeric tokens of length >= 3 (skip filler words)
     import re
-    tokens = [t for t in re.findall(r"[a-zA-Z0-9+#.]{3,}", text.lower())
+    hay = (jd_text + " " + " ".join(jd_requirements)).lower()
+    # Tokens length >= 2 (so short real skills like "go", "r", "ml" can be checked),
+    # minus filler words.
+    tokens = [t for t in re.findall(r"[a-zA-Z0-9+#.]{2,}", text.lower())
               if t not in _STOPWORDS]
     if not tokens:
-        return True  # nothing checkable — keep it
-    # Require that at least one "content" token from the claim appears in the JD
-    return any(tok in hay for tok in tokens)
+        # Pure filler/no checkable token — for a *skill/gap* claim this is suspicious,
+        # so reject rather than keep (prevents 1-char noise slipping through).
+        return False
+    # Every token must appear in the JD as a WHOLE WORD (word-boundary match).
+    # This blocks "go" matching inside "governance", "r" inside "report",
+    # "java" inside "javascript", etc. We require ALL content tokens to match so a
+    # multi-word skill ("power bi") only passes if both words are present.
+    for tok in tokens:
+        esc = re.escape(tok)
+        if not re.search(r"(?<![a-z0-9])" + esc + r"(?![a-z0-9])", hay):
+            return False
+    return True
 
 _STOPWORDS = {
     "the","and","for","with","this","that","jd","requires","resume","has","have",
@@ -157,8 +167,16 @@ Do NOT invent candidate experience not written in the resume.
 Every claim, gap, and skill must trace to a specific line in the JD or resume.
 If you cannot point to where it came from, omit it.
 
-The "Technical skills detected" line is a naive keyword scan — a hint only, possibly
-wrong. The authoritative source is the full JD text. Re-read it and decide yourself.
+The "Technical skills detected" and "Experience required" lines are naive automated
+scans — HINTS ONLY and often wrong. The authoritative source is the full JD text below.
+Re-read it and decide the real requirements yourself.
+
+IGNORE any experience figure that is not stated as a hiring requirement. For example,
+"For more than 50 years the company has..." is company history, NOT a candidate
+requirement. Only treat a number as required experience if the JD explicitly asks the
+CANDIDATE to have N years (e.g. "5+ years of experience in data engineering"). If the
+JD states experience only qualitatively (e.g. "significant experience"), set the
+experience requirement accordingly and never invent a number.
 
 ═══ JOB ═══
 Title: {title}
@@ -472,9 +490,19 @@ async def run_analysis(job_data: dict, resume_b64: str | None) -> dict:
         ms for ms in result["missing_skills"]
         if _grounded_in_jd(ms.get("skill", "") if isinstance(ms, dict) else str(ms), jd_text, jd_reqs)
     ]
+    def _sane_experience_gap(g: str) -> bool:
+        # Reject gaps citing an implausible experience requirement (e.g. "50+ years"),
+        # which usually come from scraping company history ("for 50 years...").
+        import re
+        m = re.search(r"(\d{1,3})\s*\+?\s*years?", g.lower())
+        if m and int(m.group(1)) > 20:
+            return False
+        return True
+
     result["gap_reasons"] = [
         g for g in result["gap_reasons"]
         if _grounded_in_jd(g if isinstance(g, str) else g.get("text", ""), jd_text, jd_reqs)
+        and _sane_experience_gap(g if isinstance(g, str) else g.get("text", ""))
     ]
     cleaned_suggestions = []
     for s in result["resume_suggestions"]:
