@@ -7,3 +7,4 @@ python-dotenv==1.0.1
 pydantic==2.10.6
 slowapi==0.1.9
 email-validator==2.1.1
+pymupdf==1.24.10

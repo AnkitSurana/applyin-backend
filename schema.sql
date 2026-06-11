@@ -119,5 +119,6 @@ create trigger on_auth_user_created
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Done. New signups auto-get a profile (trigger) + 3 credits (backend auth.py).
+-- AFTER running this, run schema_migration.sql to add the metrics columns.
 -- Verify: select * from user_credit_balances;
 -- ═══════════════════════════════════════════════════════════════════════════
