@@ -26,6 +26,10 @@ logger = logging.getLogger("applyin.gate")
 
 GATE_MODEL = "gpt-4o-mini"
 
+# DoS guards. A resume is a few pages; anything past these is abuse or a mistake.
+MAX_PDF_BYTES = 8 * 1024 * 1024   # 8 MB decoded
+MAX_PDF_PAGES = 30                # refuse to parse/render past this
+
 
 def parse_resume_stats(resume_b64: str) -> dict:
     """
@@ -34,7 +38,7 @@ def parse_resume_stats(resume_b64: str) -> dict:
     the caller's validity logic decides, never this function.
     """
     out = {"pages_parsed": 0, "word_count": 0, "text": "", "is_pdf": False,
-           "render_pages": 0}
+           "render_pages": 0, "oversize": False}
     try:
         import fitz  # PyMuPDF
     except Exception:
@@ -46,6 +50,11 @@ def parse_resume_stats(resume_b64: str) -> dict:
     except Exception:
         return out
 
+    if len(pdf_bytes) > MAX_PDF_BYTES:
+        logger.warning(f"Resume rejected: {len(pdf_bytes)} bytes > {MAX_PDF_BYTES}")
+        out["oversize"] = True
+        return out
+
     # Confirm it's actually a PDF (header within first bytes).
     out["is_pdf"] = pdf_bytes[:1024].find(b"%PDF") != -1
     if not out["is_pdf"]:
@@ -55,6 +64,13 @@ def parse_resume_stats(resume_b64: str) -> dict:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception as e:
         logger.warning(f"PyMuPDF open failed: {e}")
+        return out
+
+    if doc.page_count > MAX_PDF_PAGES:
+        logger.warning(f"Resume rejected: {doc.page_count} pages > {MAX_PDF_PAGES}")
+        out["oversize"] = True
+        out["pages_parsed"] = doc.page_count
+        doc.close()
         return out
 
     texts = []
@@ -155,6 +171,10 @@ async def run_resume_gate(client: httpx.AsyncClient, resume_b64: str | None,
     stats = parse_resume_stats(resume_b64)
     base["pages_parsed"] = stats["pages_parsed"]
     base["word_count"]   = stats["word_count"]
+
+    if stats.get("oversize"):
+        base["reason"] = "RESUME_TOO_LARGE"
+        return base
 
     if not stats["is_pdf"]:
         base["reason"] = "NOT_A_PDF"

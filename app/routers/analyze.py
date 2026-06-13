@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from typing import Optional, List
 import hashlib, time, logging, uuid
@@ -7,11 +7,27 @@ from app.config import get_supabase, settings
 from app.dependencies import get_current_user
 from app.services.ai import run_analysis, ResumeRejected, SCORE_WEIGHTS
 from app.routers.auth import _get_balance
+from app.limiter import limiter
 
 router = APIRouter()
 logger = logging.getLogger("applyin.analyze")
 
 ANALYSIS_CREDIT_COST = 1
+
+
+def _has_resume_consent(db, user_id: str) -> bool:
+    """DPDP: resume processing requires the user's current consent. We read the
+    latest 'resume_processing' decision; processing is allowed only if the newest
+    row is granted=true. No consent row = not granted = refuse."""
+    try:
+        rows = db.table("consent_records").select("granted,created_at") \
+            .eq("user_id", user_id).eq("purpose", "resume_processing") \
+            .order("created_at", desc=True).limit(1).execute()
+        return bool(rows.data and rows.data[0].get("granted") is True)
+    except Exception as e:
+        # Fail CLOSED: if we cannot verify consent, do not process.
+        logger.warning(f"Consent check failed, refusing to process: {e}")
+        return False
 
 # User-facing messages per gate reason. No silent JD-only output ever.
 REJECT_MESSAGES = {
@@ -21,6 +37,7 @@ REJECT_MESSAGES = {
     "UNREADABLE_PDF":       "We couldn't read that resume. If it's scanned, upload a text-based PDF.",
     "NOT_A_RESUME":         "That doesn't look like a resume. Please upload your CV.",
     "INSUFFICIENT_CONTENT": "That resume has too little readable content to analyse.",
+    "RESUME_TOO_LARGE":     "That PDF is too large. Please upload a resume under 8 MB / 30 pages.",
     "ANALYSIS_DEGENERATE":  "We couldn't read your resume reliably. Please re-upload and try again.",
 }
 
@@ -132,7 +149,8 @@ def _store_metrics(db, req_id, user_id, job: JobData, result, meter_dict, *,
 
 
 @router.post("/job")
-async def analyze_job(req: AnalyzeRequest, user=Depends(get_current_user)):
+@limiter.limit("20/minute")
+async def analyze_job(request: Request, req: AnalyzeRequest, user=Depends(get_current_user)):
     db = get_supabase()
     user_id = user.id
     req_id = uuid.uuid4().hex[:12]
@@ -169,6 +187,17 @@ async def analyze_job(req: AnalyzeRequest, user=Depends(get_current_user)):
         logger.warning(f"INSUFFICIENT_CREDITS req={req_id} user={user_id} balance={balance}")
         raise HTTPException(status_code=402, detail="INSUFFICIENT_CREDITS")
 
+    # 2b. Consent (DPDP). When enabled, resume processing requires current consent.
+    #     Checked AFTER cache and BEFORE any new processing or charge. Disabled by
+    #     default (settings.ENFORCE_CONSENT) until the consent UI is live, so this
+    #     never silently blocks analysis before users can grant consent.
+    if settings.ENFORCE_CONSENT and not _has_resume_consent(db, user_id):
+        logger.info(f"CONSENT_MISSING req={req_id} user={user_id}")
+        raise HTTPException(status_code=403, detail={
+            "code": "CONSENT_REQUIRED",
+            "message": "Please agree to resume processing to run an analysis.",
+        })
+
     # 3. Run — but DO NOT charge yet. The gate inside run_analysis may reject,
     #    and a rejected resume must never cost a credit or produce output.
     try:
@@ -186,7 +215,7 @@ async def analyze_job(req: AnalyzeRequest, user=Depends(get_current_user)):
         })
     except Exception as e:
         logger.error(f"Analysis FAILED req={req_id} user={user_id} job='{req.job.title}': {e}")
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Analysis failed. Please try again.")
 
     # 4. Analysis succeeded → NOW charge the credit.
     db.table("credit_ledger").insert({

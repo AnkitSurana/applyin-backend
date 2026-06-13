@@ -13,6 +13,12 @@ class Settings:
     APP_URL: str = os.getenv("APP_URL", "https://applyin-backend.onrender.com").rstrip("/")
     BACKEND_URL: str = os.getenv("BACKEND_URL", "https://applyin-backend.onrender.com")
 
+    # Consent enforcement. OFF by default so analysis works before the consent UI
+    # exists. Turn ON (set ENFORCE_CONSENT=true) only AFTER the signup/first-run
+    # consent flow is live, or every analysis will 403. DPDP requires this ON in
+    # production once consent can actually be collected.
+    ENFORCE_CONSENT: bool = os.getenv("ENFORCE_CONSENT", "false").lower() == "true"
+
     # Credit packages (credits, price in paise for INR, price in cents for USD)
     CREDIT_PACKAGES = [
         {"id": "starter",    "credits": 20,  "inr": 29900,  "usd": 399,   "label": "Starter",    "popular": False},

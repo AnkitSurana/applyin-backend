@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 import time, logging
 from app.config import get_supabase, get_admin, settings
 from app.dependencies import get_current_user
+from app.limiter import limiter
 
 router = APIRouter()
 logger = logging.getLogger("applyin.auth")
@@ -16,6 +17,9 @@ logger = logging.getLogger("applyin.auth")
 class SignupRequest(BaseModel):
     email: str
     password: str
+    # DPDP: Applyin is an 18+ service. The client must send this as true,
+    # representing the user's self-attestation that they are 18 or older.
+    is_adult: bool = False
 
 class LoginRequest(BaseModel):
     email: str
@@ -67,9 +71,16 @@ def _grant_signup_credits(admin, user_id: str) -> int:
         return 0
 
 @router.post("/signup")
-async def signup(req: SignupRequest):
+@limiter.limit("5/minute")
+async def signup(request: Request, req: SignupRequest):
     if len(req.password) < 6:
         raise HTTPException(400, "Password must be at least 6 characters")
+
+    # DPDP: Applyin is for adults (18+). Require explicit self-attestation.
+    # Gated behind ENFORCE_CONSENT so it activates together with the consent UI;
+    # until then, existing signup flows (which may not send is_adult) keep working.
+    if settings.ENFORCE_CONSENT and not req.is_adult:
+        raise HTTPException(400, "You must confirm you are 18 or older to use Applyin.")
 
     auth_client = get_supabase()   # used ONLY for the auth call
     admin = get_admin()            # fresh service-role client for all DB writes
@@ -77,7 +88,7 @@ async def signup(req: SignupRequest):
     try:
         res = auth_client.auth.sign_up({"email": req.email, "password": req.password})
         if not res.user:
-            raise HTTPException(400, "Signup failed — email may already be registered")
+            raise HTTPException(400, "Signup failed. This email may already be registered.")
 
         # Supabase returns a user with an EMPTY identities list when the email is
         # already registered (its signal for "already taken"). Detect and reject,
@@ -110,7 +121,7 @@ async def signup(req: SignupRequest):
             raise HTTPException(
                 503,
                 "Account created but email confirmation is required. "
-                "Check your inbox — or ask your admin to disable email confirmation in Supabase."
+                "Check your inbox, or ask your admin to disable email confirmation in Supabase."
             )
 
         return {
@@ -125,10 +136,11 @@ async def signup(req: SignupRequest):
         raise
     except Exception as e:
         logger.error(f"Signup error: {e}")
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, "Signup failed. Please try again.")
 
 @router.post("/login")
-async def login(req: LoginRequest):
+@limiter.limit("10/minute")
+async def login(request: Request, req: LoginRequest):
     auth_client = get_supabase()   # used ONLY for the auth call
     admin = get_admin()            # fresh service-role client for all DB writes
 
@@ -171,7 +183,7 @@ async def login(req: LoginRequest):
         raise
     except Exception as e:
         logger.error(f"Login error: {e}")
-        raise HTTPException(401, str(e))
+        raise HTTPException(401, "Invalid email or password")
 
 @router.get("/me")
 async def me(user=Depends(get_current_user)):
@@ -180,7 +192,8 @@ async def me(user=Depends(get_current_user)):
     return {"user_id": user.id, "email": user.email, "credits": balance}
 
 @router.post("/refresh")
-async def refresh_token(body: dict):
+@limiter.limit("20/minute")
+async def refresh_token(request: Request, body: dict):
     auth_client = get_supabase()
     try:
         rt = body.get("refresh_token", "")

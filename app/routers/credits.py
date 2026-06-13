@@ -1,10 +1,11 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import razorpay, hmac, hashlib, logging
 from app.config import get_supabase, settings
 from app.dependencies import get_current_user
 from app.routers.auth import _get_balance
+from app.limiter import limiter
 
 router = APIRouter()
 logger = logging.getLogger("applyin.credits")
@@ -28,7 +29,8 @@ async def get_packages():
     return {"packages": settings.CREDIT_PACKAGES}
 
 @router.post("/create-payment-link")
-async def create_payment_link(req: CreateOrderRequest, user=Depends(get_current_user)):
+@limiter.limit("10/minute")
+async def create_payment_link(request: Request, req: CreateOrderRequest, user=Depends(get_current_user)):
     pkg = next((p for p in settings.CREDIT_PACKAGES if p["id"] == req.package_id), None)
     if not pkg:
         raise HTTPException(400, "Invalid package ID")
@@ -60,10 +62,10 @@ async def create_payment_link(req: CreateOrderRequest, user=Depends(get_current_
 
     except razorpay.errors.BadRequestError as e:
         logger.error(f"Razorpay BadRequest: {e}")
-        raise HTTPException(400, f"Razorpay error: {str(e)}")
+        raise HTTPException(400, "Could not create payment. Please try again.")
     except Exception as e:
         logger.error(f"Payment link creation failed: {e}")
-        raise HTTPException(500, f"Could not create payment link: {str(e)}")
+        raise HTTPException(500, "Could not create payment link. Please try again.")
 
     # Store as pending order
     db = get_supabase()
@@ -196,28 +198,27 @@ p{{font-size:14px;color:#5f6368;line-height:1.6;margin-bottom:20px}}
 
 
 @router.post("/order")
-async def create_order(req: CreateOrderRequest, user=Depends(get_current_user)):
-    return await create_payment_link(req, user)
+@limiter.limit("10/minute")
+async def create_order(request: Request, req: CreateOrderRequest, user=Depends(get_current_user)):
+    return await create_payment_link(request, req, user)
 
 @router.post("/verify-payment")
-async def verify_payment(req: VerifyPaymentRequest, user=Depends(get_current_user)):
-    db = get_supabase()
+@limiter.limit("20/minute")
+async def verify_payment(request: Request, req: VerifyPaymentRequest, user=Depends(get_current_user)):
+    """Read-only status check. Credit granting happens ONLY in the Razorpay
+    webhook and the signed payment-callback. This endpoint never inserts credits;
+    it verifies the signature and reports the current balance so a client can
+    confirm. This removes the client-trusted grant path entirely."""
     msg = f"{req.razorpay_order_id}|{req.razorpay_payment_id}".encode()
     expected = hmac.new(settings.RAZORPAY_KEY_SECRET.encode(), msg, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, req.razorpay_signature):
         raise HTTPException(400, "Signature mismatch")
-    order_res = db.table("credit_orders").select("*") \
+    db = get_supabase()
+    order_res = db.table("credit_orders").select("status,credits") \
         .eq("razorpay_order_id", req.razorpay_order_id) \
-        .eq("user_id", user.id).eq("status", "pending").maybe_single().execute()
-    if not order_res.data:
-        return {"ok": True, "credits_added": 0, "credits_balance": _get_balance(db, user.id)}
-    order = order_res.data
-    db.table("credit_ledger").insert({
-        "user_id": user.id, "delta": order["credits"], "reason": "purchase", "meta": {}
-    }).execute()
-    db.table("credit_orders").update({"status": "paid", "razorpay_payment_id": req.razorpay_payment_id}) \
-        .eq("razorpay_order_id", req.razorpay_order_id).execute()
-    return {"ok": True, "credits_added": order["credits"], "credits_balance": _get_balance(db, user.id)}
+        .eq("user_id", user.id).maybe_single().execute()
+    paid = bool(order_res.data and order_res.data.get("status") == "paid")
+    return {"ok": True, "paid": paid, "credits_balance": _get_balance(db, user.id)}
 
 @router.get("/history")
 async def get_history(user=Depends(get_current_user)):

@@ -139,7 +139,19 @@ async def _call_responses_json(client, content_blocks, max_tokens, label, meter:
     raw = "\n".join(text_parts).strip()
     if not raw and data.get("output_text"):
         raw = data["output_text"]
-    return _strip_to_json(raw)
+    parsed = _strip_to_json(raw)
+    # Diagnostic: if we got an empty/degenerate parse, surface why. Common causes:
+    # truncated output (hit max_output_tokens), or an unexpected response shape.
+    if not parsed or (isinstance(parsed, dict) and not parsed):
+        status = None
+        try:
+            status = data.get("status") or (data.get("output", [{}])[0].get("status"))
+        except Exception:
+            pass
+        logger.error(f"DIAG {label}: empty/[]-parse. status={status} "
+                     f"raw_len={len(raw)} raw_head={raw[:300]!r} "
+                     f"data_keys={list(data.keys())[:12]}")
+    return parsed
 
 
 def _render_pdf_to_image_blocks(resume_b64: str) -> list:
@@ -504,7 +516,13 @@ async def run_analysis(job_data: dict, resume_b64: str | None):
     # sub-scores ⇒ it didn't actually read it. Do NOT return a fake result.
     if all(int(breakdown.get(d, 0)) == 0 for d in SCORE_WEIGHTS):
         diag["all_zero_scores"] = True
+        # Diagnostic: show WHY scores are zero. Is score_breakdown missing entirely
+        # (parse/shape problem) or present-but-zero (model genuinely scored zero)?
         logger.error("ALL SUB-SCORES ZERO despite valid gate — rejecting (no false output)")
+        logger.error(f"DIAG all-zero: result_keys={list(result.keys())[:15]} "
+                     f"breakdown_present={'score_breakdown' in result} "
+                     f"breakdown_keys={list(breakdown.keys())[:10]} "
+                     f"breakdown_sample={ {d: breakdown.get(d) for d in SCORE_WEIGHTS} }")
         raise ResumeRejected("ANALYSIS_DEGENERATE", diag["gate"])
 
     result.setdefault("jd_requirements", [])
