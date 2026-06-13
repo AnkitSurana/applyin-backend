@@ -1,3 +1,6 @@
+-- NOTE: For a fresh setup, run schema_reset.sql instead (one file, all tables).
+-- This file is kept for reference. SUPERSEDED by schema_reset.sql.
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Applyin — metrics migration
 -- Adds business-metric columns to usage_events (cost/token/behaviour analysis)

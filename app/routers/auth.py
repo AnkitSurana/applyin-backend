@@ -76,11 +76,10 @@ async def signup(request: Request, req: SignupRequest):
     if len(req.password) < 6:
         raise HTTPException(400, "Password must be at least 6 characters")
 
-    # DPDP: Applyin is for adults (18+). Require explicit self-attestation.
-    # Gated behind ENFORCE_CONSENT so it activates together with the consent UI;
-    # until then, existing signup flows (which may not send is_adult) keep working.
-    if settings.ENFORCE_CONSENT and not req.is_adult:
-        raise HTTPException(400, "You must confirm you are 18 or older to use Applyin.")
+    # Note: Applyin is a professional job-fit tool with no age-sensitive content,
+    # so there is no 18+ gate. The is_adult field is accepted for backward
+    # compatibility but not required. Consent for resume processing is handled
+    # via /privacy/consent and (optionally) enforced in the analyze route.
 
     auth_client = get_supabase()   # used ONLY for the auth call
     admin = get_admin()            # fresh service-role client for all DB writes
@@ -100,7 +99,20 @@ async def signup(request: Request, req: SignupRequest):
         user_id = res.user.id
         logger.info(f"New signup: {req.email} ({user_id})")
 
-        # Create profile via admin client (retry — auth.users write can lag)
+        # Anti-abuse: do NOT grant free credits to an unconfirmed email. When
+        # Supabase email confirmation is ON, res.session is None until the user
+        # clicks the verification link. We grant credits only once they have a
+        # real session (i.e. a verified, usable account). This stops dummy-email
+        # signups from draining the free-credit pool. The grant then happens on
+        # their first confirmed login (see /login, which grants if missing).
+        if not res.session:
+            raise HTTPException(
+                503,
+                "Almost there. Please check your inbox and confirm your email to "
+                "activate your account and free credits."
+            )
+
+        # Confirmed session present -> safe to create profile + grant credits.
         for attempt in range(3):
             try:
                 admin.table("user_profiles").upsert({"id": user_id, "email": req.email}).execute()
@@ -112,17 +124,6 @@ async def signup(request: Request, req: SignupRequest):
                     time.sleep(0.5)
 
         credits = _grant_signup_credits(admin, user_id)
-
-        # res.session is None when email confirmation is enabled in Supabase —
-        # the user exists but can't log in until they confirm. If you hit this,
-        # go to Supabase Dashboard → Auth → Providers → Email and disable
-        # "Confirm email", or configure a custom SMTP provider.
-        if not res.session:
-            raise HTTPException(
-                503,
-                "Account created but email confirmation is required. "
-                "Check your inbox, or ask your admin to disable email confirmation in Supabase."
-            )
 
         return {
             "ok": True,

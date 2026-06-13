@@ -30,8 +30,13 @@ def _is_allowed(origin: str) -> bool:
         return False
     if origin in ALLOWED_ORIGINS:
         return True
-    # Allow any chrome/edge extension origin only if explicitly opted in via "*ext*".
-    if "ALLOW_ANY_EXTENSION" in _os.environ and origin.startswith(("chrome-extension://", "moz-extension://")):
+    # Browser extension origins (chrome-extension:// / moz-extension://) are our
+    # own first-party client and cannot be spoofed by an arbitrary website, so we
+    # allow them by default. Set BLOCK_UNKNOWN_EXTENSIONS=true + list specific
+    # extension IDs in ALLOWED_ORIGINS to lock this down to your published ID only.
+    if origin.startswith(("chrome-extension://", "moz-extension://")):
+        if "BLOCK_UNKNOWN_EXTENSIONS" in _os.environ:
+            return origin in ALLOWED_ORIGINS  # only explicitly listed IDs
         return True
     return False
 

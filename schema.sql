@@ -1,3 +1,6 @@
+-- NOTE: For a fresh setup, run schema_reset.sql instead (one file, all tables).
+-- This file is kept for reference. SUPERSEDED by schema_reset.sql.
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Applyin — Fresh Install Schema
 -- Run in Supabase SQL Editor. Wipes and recreates everything.
