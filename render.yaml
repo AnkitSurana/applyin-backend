@@ -1,0 +1,46 @@
+services:
+  - type: web
+    name: applyin-backend
+    runtime: python
+    region: singapore
+    plan: free
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: BACKEND_URL
+        sync: false
+      # Comma-separated allowed CORS origins.
+      # Must include your Chrome extension ID and https://www.linkedin.com.
+      # Example: chrome-extension://abcdef1234567890,https://www.linkedin.com
+      - key: ALLOWED_ORIGINS
+        sync: false
+      # Gates /health/diagnostics and /docs. Leave unset to disable both endpoints.
+      - key: DIAGNOSTICS_KEY
+        sync: false
+      # Set to "true" in production to allow ONLY the extension id(s) listed in
+      # ALLOWED_ORIGINS (blocks all other browser extensions). Make sure your
+      # published chrome-extension://<id> is in ALLOWED_ORIGINS before enabling.
+      - key: BLOCK_UNKNOWN_EXTENSIONS
+        sync: false
+      # DPDP consent enforcement. Keep true in production.
+      - key: ENFORCE_CONSENT
+        value: "true"
+      # Dedicated salt for hashing IPs before storage (privacy). Set a random
+      # value, e.g. `openssl rand -hex 16`. Used only for IP hashing, nothing else.
+      - key: IP_HASH_SALT
+        sync: false

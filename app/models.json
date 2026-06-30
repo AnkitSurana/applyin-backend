@@ -1,0 +1,38 @@
+{
+  "_comment": "SINGLE source of truth: every model, its price (USD per 1M tokens), and the roles it serves via 'use_for'. The 4 roles are the backend AI steps: resume_gate (validate resume), analysis (score + report), research (company interview web-search), interview (interview prep). These match the AUDIT log 'timings_ms[...]' labels. To switch which model a step uses, move that role name into a different model's 'use_for'. Each role must appear in exactly one model's 'use_for'. Models without 'use_for' are just priced/available. GPT-5 / o-series are auto-detected as reasoning models. Re-check https://developers.openai.com/api/docs/pricing before trusting prices.",
+
+  "models": {
+    "gpt-4o":       { "input": 2.50,  "output": 10.00, "use_for": ["analysis", "research"] },
+    "gpt-4o-mini":  { "input": 0.15,  "output": 0.60,  "use_for": ["interview", "resume_gate"] },
+    "gpt-4.1":      { "input": 2.00,  "output": 8.00 },
+    "gpt-4.1-mini": { "input": 0.40,  "output": 1.60 },
+    "gpt-4.1-nano": { "input": 0.10,  "output": 0.40 },
+    "gpt-5.5":      { "input": 5.00,  "output": 30.00 },
+    "gpt-5.5-pro":  { "input": 30.00, "output": 180.00 },
+    "gpt-5.4":      { "input": 2.50,  "output": 15.00 },
+    "gpt-5.4-mini": { "input": 0.75,  "output": 4.50 },
+    "gpt-5.4-nano": { "input": 0.20,  "output": 1.25 },
+    "gpt-5.4-pro":  { "input": 30.00, "output": 180.00 },
+    "gpt-5.2":      { "input": 1.75,  "output": 14.00 },
+    "gpt-5.2-pro":  { "input": 21.00, "output": 168.00 },
+    "gpt-5.1":      { "input": 1.25,  "output": 10.00 },
+    "gpt-5":        { "input": 1.25,  "output": 10.00 },
+    "gpt-5-mini":   { "input": 0.25,  "output": 2.00 },
+    "gpt-5-nano":   { "input": 0.05,  "output": 0.40 },
+    "gpt-5-pro":    { "input": 15.00, "output": 120.00 },
+    "o1":           { "input": 15.00, "output": 60.00 },
+    "o1-mini":      { "input": 1.10,  "output": 4.40 },
+    "o3":           { "input": 2.00,  "output": 8.00 },
+    "o3-mini":      { "input": 1.10,  "output": 4.40 },
+    "o4-mini":      { "input": 1.10,  "output": 4.40 }
+  },
+
+  "_token_budgets_comment": "Base output-token budget per step. Reasoning models get 'reasoning_headroom' added on top automatically.",
+  "token_budgets": { "analysis": 6000, "interview": 3500, "resume_gate": 300 },
+
+  "_reasoning_headroom_comment": "Extra output budget for reasoning models ONLY (their thinking counts toward output, so a big JSON answer gets cut off without it). 10000 is validated by a real gpt-5.4-mini analysis. It's a ceiling - unused room is free. Bump it if you ever see truncation.",
+  "reasoning_headroom": 10000,
+
+  "_reasoning_effort_comment": "Reasoning models only. Empty string => 'low' is used. Other values: none (some models), low, medium, high, xhigh.",
+  "reasoning_effort": ""
+}
